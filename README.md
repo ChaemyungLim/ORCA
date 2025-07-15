@@ -1,1 +1,1 @@
-# ORCA
+# ORCA: ORchestrating Causal Agent 🐳
