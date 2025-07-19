@@ -1,17 +1,16 @@
 # causal_analysis/nodes/fetch_data.py
 
 import pandas as pd
-import json
+import json, re
 from typing import Dict
 from utils.database import Database 
 from utils.llm import call_llm
-from ORCA.prompts.causal_analysis_prompts import fix_sql_prompt, fix_sql_parser, sql_query_parser
+from prompts.causal_analysis_prompts import fix_sql_prompt 
 from langchain_core.language_models.chat_models import BaseChatModel
 
 database = Database()
 
 def prepare_state(state: dict) -> dict:
-    # when sql query information is fully provided
     if state["variable_info"]:
         state["parsed_query"] = state["variable_info"]
     return state
@@ -54,7 +53,7 @@ def build_fetch_data_node(llm: BaseChatModel):
             for _ in range(3): # Retry up to 3 times
                 revised_response = call_llm(
                     prompt=fix_sql_prompt,
-                    parser=fix_sql_parser,
+                    # parser=fix_sql_parser,
                     variables={
                         "original_sql": sql_query,
                         "error_message": last_error,
@@ -64,7 +63,13 @@ def build_fetch_data_node(llm: BaseChatModel):
                     },
                     llm=llm
                 )
-                revised_query = revised_response.sql_query
+                # Extract SQL query from the response
+                sql_match = re.search(r"```sql\s*(.*?)```", revised_response, re.DOTALL | re.IGNORECASE)
+                if sql_match:
+                    revised_query = sql_match.group(1).strip()
+                else:
+                    revised_query = revised_response.strip()
+                
                 try:
                     df = run_and_validate_query(revised_query, db_id, expected_columns_base)
                     state["sql_query"] = revised_query

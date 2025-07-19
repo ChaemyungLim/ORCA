@@ -55,101 +55,384 @@ If helpful, here is a dictionary mapping variable names to SQL expressions:
 """)
 ]).partial(format_instructions=parse_query_parser.get_format_instructions())
 
+
+
 ### 2. SQL Generation Prompt
-class GeneratedSQL(BaseModel):
-    sql_query: str = Field(..., description="A valid SQL query to fetch data for causal analysis")
-
-sql_query_parser = PydanticOutputParser(pydantic_object=GeneratedSQL)
-
 sql_generation_prompt = ChatPromptTemplate.from_messages([
     ("system", """
-You are a senior data analyst generating a SQL query for causal analysis.
+You are a senior data analyst generating a PostgreSQL query for causal analysis. Decompose the task into subtasks to generate a final SQL query.
+     
+You will be given:
+- A list of variable names that appear in the causal graph with a mapping to its SQL expression. Every variable **must** be selected in the final query **only** using its corresponding SQL expression. Do not use other expressions, even if they are semantically equivalent.
+- Table Schema Information.
 
-You are given:
-- A list of variable names that appear in the causal graph.
-- A mapping from each variable to its SQL expression.
-   - ⚠️ These expressions may include unsafe patterns such as correlated subqueries.
-        Do not blindly copy them into the SELECT clause.
-        Instead, transform them into JOIN-based expressions if they rely on values from other tables.
-- Full schema descriptions.
-
-Write a SQL query that:
-- SELECTs each expression using `AS variable_name`
-- Joins all required tables using valid foreign keys
-- Returns a flat, analysis-ready table
+## Instructions:
+Decompose the task into:
+1.	For each variable, check if the expression can be computed directly from the available tables by a simple join (and, if necessary, GROUP BY or aggregate). If so, compute it directly in the final_table CTE and do not create a separate CTE for this variable.
+2.  If a variable cannot be computed directly from the available tables and requires a non-trivial subquery, repeated logic, or pre-aggregation that cannot be handled directly in final_table create a CTE for that variable. If multiple variables share the same SQL expression, they can be selected together in the same CTE/subquery. 
+3.	In final_table, join all necessary tables and CTEs and select all variables. The order in which you join tables in the final_table should always respect the foreign key (FK) relationships specified in the schema.
+4.	The final query must always be SELECT * FROM final_table;.
 
 ## Rules:
 - Do not include explanatory text
-- Use only columns and tables from the schema
+- NEVER assume any relationships not explicitly stated as foreign keys. When joining CTEs or tables, use only the foreign key relationships defined in the schema. Do not calculate a new varaible to join tables.
 - Do not alias tables (e.g., avoid `FROM users u`)
 - Do not include GROUP BY or ORDER BY unless needed
-- All expressions must be valid SQL syntax (e.g., DATE_PART, COALESCE, CASE WHEN)
-
 - NEVER write expressions like `(SELECT ... WHERE ... = outer_column LIMIT 1)`, as they will result in 'correlated subquery' errors in PostgreSQL.
-- For Boolean flags based on lookup tables (e.g., "used_coupon" from "coupon_usage"), precompute them via LEFT JOIN subqueries using DISTINCT or GROUP BY, and assign the Boolean directly (e.g., TRUE AS used_coupon).
-- All SELECT expressions must refer to columns or aliases available in the FROM/JOIN scope.
+- Always output the final SQL query as a code block with ```sql ```.
 
-{format_instructions}
+## Example1:
+Variables:
+- cart_item_id
+- campaign_exposed
+- cart_total_value
+
+Variable to SQL expression mapping:
+- cart_item_id: cart_items.cart_item_id
+- campaign_exposed: CASE WHEN COUNT(campaign_exposure.exposure_id) > 0 THEN TRUE ELSE FALSE END
+- cart_total_value: SUM(cart_items.price * cart_items.quantity)
+
+Schema:
+TABLE: carts
+  COLUMNS: cart_id (uuid), customer_id (uuid), created_at (date)
+TABLE: cart_items
+  COLUMNS: cart_item_id (uuid), cart_id (uuid), product_id (uuid), price (numeric), quantity (integer)
+TABLE: campaign_exposure
+  COLUMNS: exposure_id (uuid), cart_id (uuid), campaign_id (uuid)
+TABLE: campaigns
+  COLUMNS: campaign_id (uuid), name (text), start_date (date), end_date (date)
+
+FOREIGN KEYS:
+  carts.cart_id -> cart_items.cart_id
+  carts.cart_id -> campaign_exposure.cart_id
+  campaign_exposure.campaign_id -> campaigns.campaign_id
+
+Output:
+```sql
+WITH
+campaign_exposed_per_cart AS (
+    SELECT
+        cart_id,
+        CASE WHEN COUNT(exposure_id) > 0 THEN TRUE ELSE FALSE END AS campaign_exposed
+    FROM campaign_exposure
+    GROUP BY cart_id
+),
+final_table AS (
+    SELECT
+        cart_items.cart_item_id AS cart_item_id,
+        SUM(cart_items.price * cart_items.quantity) AS cart_total_value
+        campaign_exposed_per_cart.campaign_exposed AS campaign_exposed
+    FROM cart_items 
+    LEFT JOIN campaign_exposed_per_cart ON cart_items.cart_id = campaign_exposed_per_cart.cart_id
+)
+SELECT * FROM final_table;
+```
+
+## Example2:
+Variables:
+- student_id
+- average_score
+- teacher_name
+
+Variable to SQL expression mapping:
+- student_id: students.student_id
+- average_score: AVG(scores.score)
+- teacher_name: teachers.name
+
+Schema:
+TABLE: students
+  COLUMNS: student_id (uuid), name (text), class_id (uuid)
+TABLE: classes
+  COLUMNS: class_id (uuid), teacher_id (uuid)
+TABLE: teachers
+  COLUMNS: teacher_id (uuid), name (text)
+TABLE: scores
+  COLUMNS: score_id (uuid), student_id (uuid), score (numeric)
+
+FOREIGN KEYS:
+  students.class_id -> classes.class_id
+  classes.teacher_id -> teachers.teacher_id
+  scores.student_id -> students.student_id
+
+Output:
+```sql
+WITH
+average_score_table AS (
+    SELECT
+        students.student_id,
+        AVG(scores.score) AS average_score
+    FROM students
+    LEFT JOIN scores ON students.student_id = scores.student_id
+    GROUP BY students.student_id
+),
+final_table AS (
+    SELECT
+        students.student_id AS student_id,
+        average_score.average_score AS average_score,
+        teachers.name AS teacher_name
+    FROM students 
+    LEFT JOIN average_score_table ON students.student_id = average_score_table.student_id
+    LEFT JOIN classes ON students.class_id = classes.class_id -- need to join classes before joining teachers to get teacher_id (FK chain)
+    LEFT JOIN teachers ON classes.teacher_id = teachers.teacher_id 
+)
+SELECT * FROM final_table;
+```
 """),
     ("human", """
-Variables to Select:
+Variables:
 {selected_variables}
 
-Expressions:
+Variable to SQL expression mapping:
 {variable_expressions}
 
-Table Schemas:
+Schema:
 {table_schemas}
 """)
-]).partial(format_instructions=sql_query_parser.get_format_instructions())
+])
 
-### 3. SQL Fix Prompt (on failure)
-
-class FixedSQL(BaseModel):
-    sql_query: str = Field(..., description="A revised valid SQL query that resolves the original error")
-
-fix_sql_parser = PydanticOutputParser(pydantic_object=FixedSQL)
-
-fix_sql_prompt = ChatPromptTemplate.from_messages([
+### 3. review SQL Prompt
+sql_review_prompt = ChatPromptTemplate.from_messages([
     ("system", """
-You are a senior data analyst. Your task is to revise a faulty SQL query based on the error message returned during execution.
-
+You are a senior data analyst reviewing a PostgreSQL query for causal analysis.
+     
 You will be given:
-1. The original SQL query
-2. The error message it triggered
-3. A list of variable names to select and corresponding SQL expressions
-4. Table schemas
+1. A SQL query that selects data for causal analysis
+2. A list of variable names that must be selected in the query and their corresponding SQL expressions.
+3. Table schemas
 
-Your job is to modify the SQL query to resolve the error while preserving the original intent: 
-fetching all listed variables using their SQL expressions.
+## instructions:   
+You task is to check if the SQL query meets the following requirements:
+    1. The query must select all variables listed in 【Variables】. Also, you must check that each variable is selected using **exactly** the SQL expression provided in 【Variable SQL Expressions】. However, it is allowed for the required SQL expression to appear in a CTE (Common Table Expression) or subquery, as long as the final output selects the variable using the correct alias that refers to the CTE/subquery result.
+    - If the same variable name appears multiple times in the SELECT clause, keep only the one that uses the exact required SQL expression, and remove all others. Update the JOIN conditions if needed.
+    2. The query should only use JOINs based on explicit foreign key (FK) relationships as defined in the table schemas. If any JOINs are not based on an FK relationship, modify the query to use the correct FK-based JOIN instead.
+     - When fixing Joins, consider the order of joins in the FROM clause. The order should respect the foreign key (FK) relationships specified in the schema.
+    3. If sql needs to be fixed, output the revised SQL query in a code block with ```sql ```.
 
-Be sure to:
-- Correct incorrect column names or aliases
-- Fix joins if necessary
-- SELECT each expression as the `variable_name` using `AS`
-- Ensure the result includes all specified variables
-- Use only tables and columns from the provided schema
-- When using aggregate functions (e.g., AVG, COUNT), ensure that all other selected columns are either:
-  - included in the GROUP BY clause, or
-  - wrapped inside an aggregate function
-- CASE WHEN expressions are not aggregate functions and must be included in GROUP BY or aggregated
+## Rules:
+- When revising the query, you must preserve the original overall structure as much as possible (including CTEs, JOINs, and the general flow). Only add or modify specific parts as needed to satisfy the requirements. Do not rewrite the entire query from scratch.
+- If the same variable name appears multiple times in the SELECT clause, keep only the one that uses the exact required SQL expression, and remove all others. Update the JOIN conditions if needed.
+- Don't include variables other than those listed in 【Variables】. But you must ensure that all variables in 【Variables】 are selected in the final query using the SQL Expressions.
+- Never select the same variable multiple times in the final query.  
+     
+## Example1:
+【Variables】
+- cart_item_id
+- campaign_exposed
+- cart_total_value
 
-- NEVER write expressions like `(SELECT ... WHERE ... = outer_column LIMIT 1)`, as they will result in 'correlated subquery' errors in PostgreSQL.
-- For Boolean flags based on lookup tables (e.g., "used_coupon" from "coupon_usage"), precompute them via LEFT JOIN subqueries using DISTINCT or GROUP BY, and assign the Boolean directly (e.g., TRUE AS used_coupon).
-- All SELECT expressions must refer to columns or aliases available in the FROM/JOIN scope.
+【Variable SQL Expressions】
+- cart_item_id: cart_items.cart_item_id
+- campaign_exposed: CASE WHEN COUNT(campaign_exposure.exposure_id) > 0 THEN TRUE ELSE FALSE END
+- cart_total_value: SUM(cart_items.price * cart_items.quantity)
 
-{format_instructions}
+【Schema】
+TABLE: carts
+  COLUMNS: cart_id (uuid), customer_id (uuid), created_at (date)
+TABLE: cart_items
+  COLUMNS: cart_item_id (uuid), cart_id (uuid), product_id (uuid), price (numeric), quantity (integer)
+TABLE: campaign_exposure
+  COLUMNS: exposure_id (uuid), cart_id (uuid), campaign_id (uuid)
+TABLE: campaigns
+  COLUMNS: campaign_id (uuid), name (text), start_date (date), end_date (date)
+
+FOREIGN KEYS:
+  carts.cart_id -> cart_items.cart_id
+  carts.cart_id -> campaign_exposure.cart_id
+  campaign_exposure.campaign_id -> campaigns.campaign_id
+
+【SQL GENERATED】
+```sql
+WITH
+campaign_exposed_per_cart AS (
+    SELECT
+        cart_id,
+        CASE WHEN COUNT(exposure_id) > 0 THEN TRUE ELSE FALSE END AS campaign_exposed
+    FROM campaign_exposure
+    GROUP BY cart_id
+),
+final_table AS (
+    SELECT
+        cart_items.cart_item_id AS cart_item_id,
+        SUM(cart_items.price * cart_items.quantity) AS cart_total_value
+        campaign_exposed_per_cart.campaign_exposed AS campaign_exposed
+    FROM cart_items 
+    LEFT JOIN campaign_exposed_per_cart ON cart_items.cart_id = campaign_exposed_per_cart.cart_id
+)
+SELECT * FROM final_table;
+```
+【Output】
+Step 1: cart_item_id, campaign_exposed, cart_total_value are all selected correctly using their corresponding SQL expressions.
+Step 2: All joins are correct.
+Step 3: The final query is valid and selects all required variables.
+     
+## Example2:
+【Variables】
+- student_id
+- course_name
+- professor_name
+     
+【Variable SQL Expressions】
+- student_id: students.student_id
+- course_name: courses.course_name
+- professor_name: professors.name
+
+【Schema】     
+TABLE: students
+  COLUMNS: student_id (uuid), name (text), birth_year (integer)
+TABLE: enrollments
+  COLUMNS: enrollment_id (uuid), student_id (uuid), course_id (uuid), enrolled_at (date)
+TABLE: courses
+  COLUMNS: course_id (uuid), course_name (text), professor_id (uuid)
+TABLE: professors
+  COLUMNS: professor_id (uuid), name (text)
+
+FOREIGN KEYS:
+  enrollments.student_id -> students.student_id
+  enrollments.course_id -> courses.course_id
+  courses.professor_id -> professors.professor_id
+     
+【SQL GENERATED】
+```sql
+WITH final_table as (
+    SELECT
+    students.student_id AS student_id,
+    courses.course_name AS course_name,
+    professors.name AS professor_name
+FROM students
+JOIN courses ON students.student_id = courses.course_id 
+JOIN professors ON courses.professor_id = professors.professor_id)
+SELECT * FROM final_table;
+```
+【Output】
+Step 1: student_id, course_name, professor_name are all selected correctly using their corresponding SQL expressions.
+Step 2: The join between students and courses is incorrect. It should be based on enrollments table. 
+Step 3: The revised query is:
+```sql
+WITH final_table AS (
+    SELECT
+    students.student_id AS student_id,
+    courses.course_name AS course_name,
+    professors.name AS professor_name
+FROM enrollments
+JOIN students ON enrollments.student_id = students.student_id
+JOIN courses ON enrollments.course_id = courses.course_id
+JOIN professors ON courses.professor_id = professors.professor_id)
+SELECT * FROM final_table;
+```
+
+## Example3:
+【Variables】
+- customer_id
+- name
+- account_balance
+- monthly_deposit_total
+
+【Variable SQL Expressions】
+- customer_id: customers.customer_id
+- name: customers.name
+- account_balance: accounts.balance
+- monthly_deposit_total: SUM(CASE WHEN transactions.transaction_type = ‘deposit’
+AND DATE_TRUNC(‘month’, transactions.transaction_date) = DATE_TRUNC(‘month’, CURRENT_DATE)
+THEN transactions.transaction_amount ELSE 0 END)
+
+【Schema】
+TABLE: customers
+COLUMNS: customer_id (uuid), name (text), date_of_birth (date)
+TABLE: accounts
+COLUMNS: account_id (uuid), customer_id (uuid), balance (numeric), account_type (text)
+TABLE: transactions
+COLUMNS: transaction_id (uuid), account_id (uuid), transaction_amount (numeric), transaction_type (text), transaction_date (date)
+
+FOREIGN KEYS:
+accounts.customer_id -> customers.customer_id
+transactions.account_id -> accounts.account_id
+     
+【SQL GENERATED】
+```sql
+WITH final_table AS (
+    SELECT
+    customers.customer_id AS customer_id,
+    customers.name AS name,
+    accounts.balance AS account_balance
+FROM customers
+JOIN accounts ON accounts.customer_id = customers.customer_id)
+SELECT * FROM final_table;
+```
+【Output】
+Step 1: customer_id, name, account_balance are selected correctly, but monthly_deposit_total is missing.
+Step 2: The join between customers and accounts is correct, but transactions table is not included.
+Step 3: The revised query is:
+```sql
+WITH monthly_deposits AS (
+    SELECT
+        accounts.customer_id,
+        SUM(transactions.transaction_amount) AS monthly_deposit_total
+    FROM accounts
+    JOIN transactions ON transactions.account_id = accounts.account_id
+    WHERE transactions.transaction_type = 'deposit'
+      AND DATE_TRUNC('month', transactions.transaction_date) = DATE_TRUNC('month', CURRENT_DATE)
+    GROUP BY accounts.customer_id
+),
+WITH final_table as (
+    SELECT
+    customers.customer_id AS customer_id,
+    customers.name AS name,
+    accounts.balance AS account_balance,
+    COALESCE(monthly_deposits.monthly_deposit_total, 0) AS monthly_deposit_total
+FROM customers
+JOIN accounts ON accounts.customer_id = customers.customer_id
+LEFT JOIN monthly_deposits ON monthly_deposits.customer_id = customers.customer_id)
+SELECT * FROM final_table;
+```
+==============================
+Now please review the following SQL query and check if it meets the requirements. 
 """),
     ("human", """
-Original SQL Query:
+【Variables】
+{selected_variables}
+
+【Variable SQL Expressions】
+{variable_expressions}
+
+【Schema】
+{table_schemas}
+
+【SQL GENERATED】
+```sql
+{sql}
+```
+""")])
+
+### 4. Fix SQL Prompt
+fix_sql_prompt = ChatPromptTemplate.from_messages([
+    ("system", """
+An PostgreSQL was generated to fetch data including all variables indicated below for causal analysis, but it failed with an error.
+Please fix up PostgeSQL code based on query and database info. Solve the task step by step if you need to.
+     
+You will be given:
+1. The old PostgreSQL query
+2. The error message it triggered
+3. The list of variable names to select and corresponding SQL expressions. All variables must be selected in the final query.
+4. Table schemas
+
+## Rules (PostgreSQL Specific)
+- Never use aggregate functions (MAX, MIN, SUM, etc.) directly on boolean columns or boolean expressions in PostgreSQL.
+- Always cast boolean expressions to integer (e.g., (expression)::int) when using them inside aggregate functions.
+- If a boolean value is needed in the final result, cast it back or compare the result (e.g., MAX((flag)::int) = 1).
+- Example:
+  - Incorrect:   MAX(flag_column)
+  - Correct:     MAX((flag_column)::int)
+
+Now please fixup old SQL and generate new SQL again. Only output the new SQL in the code block, and indicate script type by ```sql ```in the code block.
+"""),
+    ("human", """
+Old SQL Query:
 ```sql
 {original_sql}
 ```
-
-Error Message:
-```
+PostgreSQL Error:
 {error_message}
-```
+     
 Variables to Select:
 {graph_nodes}
 
@@ -159,9 +442,10 @@ Variable Expressions:
 Table Schemas:
 {table_schemas}
 """)
-]).partial(format_instructions=fix_sql_parser.get_format_instructions())
+])
 
-## 4. Causal Strategy Selection Prompt
+
+### 5. Causal Strategy Selection Prompt
 class SelectedCausalStrategy(BaseModel):
     causal_task: str = Field(..., description="Overall causal task (e.g., estimating_causal_effect, mediation_analysis, causal_prediction, what_if)")
     identification_strategy: str = Field(..., description="Strategy used to identify the causal effect, e.g., backdoor, frontdoor, iv, mediation")
@@ -242,7 +526,7 @@ Outcome Type: {outcome_type}
 """)
 ]).partial(format_instructions=strategy_output_parser.get_format_instructions())
 
-## 5. Causal Analysis Result Generation Prompt
+### 6. Causal Analysis Result Generation Prompt
 class CausalResultExplanation(BaseModel):
     explanation: str = Field(..., description="Plain-text summary of the causal analysis results.")
 
@@ -257,7 +541,6 @@ Causal task metadata:
 - Estimator used: {estimation_method}
 - Estimated causal effect: {causal_effect_value}
 - 95% confidence interval: {causal_effect_ci}
-- p-value (if available): {causal_effect_p_value}
 - Refutation result (if any): {refutation_result}
 - Label mappings (optional): {label_maps}
 
@@ -267,12 +550,12 @@ Parsed query details:
 - Confounders: {confounders}
 - Mediators (if any): {mediators}
 - Instrumental variables (if any): {instrumental_variables}
-- Additional notes: {additional_notes}
-- Main table: {main_table}
-- Join tables: {join_tables}
+
+Your goal is to make the result interpretable to a data-literate but non-expert audience. Add an example or intuitive description where possible.
 
 Your explanation should include:
-1. Interpretation of the estimated effect,
+1. A plain interpretation of the estimated causal effect in everyday language. 
+   - Along with statistical language, provide a translation of directionality (positive/negative effect) into intuitive language (e.g., "users who signed up longer ago are slightly less active").
 2. Whether the effect is statistically significant based on p-value or CI,
 3. Whether the refutation result strengthens or weakens confidence in the finding,
 4. Any caveats or assumptions that should be kept in mind,
@@ -284,72 +567,3 @@ Respond with a concise analytical summary (3–6 sentences).
 """),
     ("human", "")
 ]).partial(format_instructions=generate_answer_parser.get_format_instructions())
-
-
-sql_reconstructor_parser = StrOutputParser()
-sql_reconstruct_prompt = ChatPromptTemplate.from_messages([
-    ("system", """
- You are a SQL reconstruction assistant. Your task is to generate a **valid and executable SQL query** that evaluates the given expression using correct FROM and JOIN clauses.
-
-### Requirements:
-1. **DO NOT change the expression itself.** Keep it exactly as given.  
-   - Exception: If the expression contains invalid SQL (e.g., nonexistent column/function), you must correct it using the provided table schemas.
-
-2. Use only table and column names that exist in the `table_schemas`.  
-   - If a column contains special characters or spaces (e.g., `Charter School (Y/N)`), wrap it in double quotes: `"Charter School (Y/N)"`.
-
-3. All table references in expressions must be joined in the FROM clause.  
-   - Do not reference a table unless it is included in `main_table` or `join_tables`.
-
-4. If using functions like `YEAR()`, `MONTH()`, etc., verify that they are valid in standard SQL.  
-   - If `YEAR(date_column)` is not valid, rewrite as `EXTRACT(YEAR FROM date_column)`.
-
-5. Do not use columns in SELECT that are not aggregated or grouped.  
-   - If the expression uses subqueries or aggregate functions, and a column is not aggregated, either wrap it in an aggregate or include it in a GROUP BY clause only if needed.
-
-6. If disambiguation is needed due to duplicate column names, prefix with the appropriate table name from the schema.
-
-7. If any table aliases are required, define and use them explicitly and consistently.  
-   - Do not reference undefined aliases (e.g., using "ha" for "hero_attribute" without declaring it).
-
-8. If a column appears in the expression but not in the schema, attempt to infer the correct table.column name based on the schema.  
-   - For example, if `"gender"` is not found, but `"superhero.gender_id"` exists, rewrite accordingly.
-
-### Output Format:
-Return a **minimal SQL query** in the form:
-
-SELECT <expression> AS result
-FROM ...
-JOIN ...
-
-- Do not wrap your output in markdown (no ```sql blocks).
-- Return the SQL query as plain text only.
-Do not include GROUP BY or ORDER BY unless strictly necessary to make the query valid.
-
-Ensure that:
-	•	All table and column names exist in the schema.
-	•	The expression is syntactically valid.
-	•	The result is a single-column query with alias result.
-
-"""),
-    ("human", """
-Given the following inputs, reconstruct the full SQL query wrapping the expression using a correct FROM and JOIN clause:
-
-Expression:
-{expression}
-
-Main Table:
-{main_table}
-
-Join Tables:
-{join_tables}
-
-Original SQL Query:
-{sql_query}
-
-Table Schemas:
-{table_schemas}
-
-Your output must only include the final SQL query.
-""")
-])

@@ -35,9 +35,7 @@ class CausalAnalysisState(BaseModel):
     causal_model: Optional[CausalModel] = None  # dowhy model
     causal_estimand: Optional[Any] = None  
     causal_estimate: Optional[CausalEstimate] = None  
-    causal_effect_value: Optional[float] = None  # ATE (Average Treatment Effect)
     causal_effect_ate: Optional[float] = None  # ATE (Average Treatment Effect)
-    causal_effect_p_value: Optional[float] = None  # p-value (optional)
     causal_effect_ci: Optional[Any] = None 
     refutation_result: Optional[str] = None 
     final_answer: Optional[str] = None 

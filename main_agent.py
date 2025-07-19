@@ -15,7 +15,7 @@ from utils.prettify import print_final_output_explorer, print_final_output_recom
 
 from agents.table_explorer import generate_description_graph
 from agents.table_recommender import generate_table_recommendation_graph
-from agents.sql_generator import generate_text2sql_graph 
+from agents.text2sql_generator import generate_text2sql_graph 
 from agents.causal_analysis import generate_causal_analysis_graph
 from experiments.causal_analysis.causal_pre_information import DEFAULT_EXPRESSION_DICT
 

@@ -40,6 +40,7 @@ def build_dowhy_analysis_node() -> RunnableLambda:
         causal_graph = state["causal_graph"]
         dot_graph = causal_graph.get("dot_graph")
         
+        # Identification
         try:
             if dot_graph:
                 model = CausalModel(
@@ -67,7 +68,7 @@ def build_dowhy_analysis_node() -> RunnableLambda:
         
         method_params = {}
 
-        # Handle GLM family
+        # Additional configuration for estimators
         if strategy.estimator == "backdoor.generalized_linear_model":
                 y = df[outcome].dropna()
                 is_binary = (
@@ -80,7 +81,6 @@ def build_dowhy_analysis_node() -> RunnableLambda:
                 else:
                     method_params["glm_family"] = sm.families.Gaussian()
 
-        # TabPFN-based propensity score modeling
         classification_estimators = [
             "backdoor.propensity_score_matching",
             "backdoor.propensity_score_stratification",
@@ -125,14 +125,13 @@ def build_dowhy_analysis_node() -> RunnableLambda:
         
         # Save useful scalar values separately
         try:
-            ci = estimate.conf_int()
+            ci = estimate.get_confidence_intervals()
+            ci = ci.tolist() if hasattr(ci, "tolist") else ci
         except Exception:
             ci = None
 
-        state["causal_effect_value"] = float(getattr(estimate, "effect", None)) if getattr(estimate, "effect", None) is not None else None
-        state["causal_effect_ci"] = ci
         state["causal_effect_ate"] = float(getattr(estimate, "value", None)) if getattr(estimate, "value", None) is not None else None
-        state["causal_effect_p_value"] = float(getattr(estimate, "p_value", None)) if getattr(estimate, "p_value", None) is not None else None
+        state["causal_effect_ci"] = ci
 
         return state
 
