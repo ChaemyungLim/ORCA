@@ -56,7 +56,6 @@ system_template =  """
 You are a senior data analyst assistant.
 You will be provided with a user's business analysis objective and a list of available tables with their descriptions.
 
-
 Your job is to:
 - 1. Recommend the most relevant database tables needed to solve the objective (up to 10; fewer is fine). Order them by relevance.
 - 2. For each table you recommend, list important columns that are most relevant to the analysis objective. Do not include all columns, just the key ones that are essential for the analysis.

@@ -5,6 +5,7 @@ import numpy as np
 
 from experiments.causal_analysis.causal_pre_information import DEFAULT_EXPRESSION_DICT, BASE_SQL_QUERY
 from agents.causal_analysis.graph import generate_causal_analysis_graph
+from agents.text2sql_generator.nodes.selector import get_schema_summary
 from utils.llm import get_llm
 from utils.load_causal_graph import load_causal_graph
 from utils.database import Database
@@ -43,6 +44,10 @@ database = Database()
 df = database.run_query(sql=BASE_SQL_QUERY, db_id="daa")
 df = pd.DataFrame(df[0], columns=df[1])
 sample_data = df.head(10).to_dict(orient="records")
+
+table_names = database.list_tables(db_id="daa")
+schema_info, fk_info, schema_tables = get_schema_summary("daa", table_names)
+table_schema_str = schema_info + "\n\n" + fk_info
 
 N = 10
 summary_list = []
@@ -122,7 +127,8 @@ Only return the raw JSON (no triple backticks).
                 },
                 "causal_graph": causal_graph,
                 "expression_dict": DEFAULT_EXPRESSION_DICT,
-                "sql_query": BASE_SQL_QUERY
+                "schema_info": table_schema_str,
+                "sql_query": BASE_SQL_QUERY # if you want to run agentic version, delete this line
             }
 
             result = app.invoke(state_input)

@@ -54,14 +54,7 @@ Your task is to provide a structured JSON analysis consisting of the following f
     - Mention how the quality of this table may affect downstream analysis.
     - Mention any prepocessing or transformations that may be needed.
 
-4. related_tables: (list of objects)
-    - table: str
-    - relation_type: "1:N", "1:1", "N:1", etc.
-    - foreign_key: str
-    - optional: true/false
-    - reason: str
-
-5. recommended_analyses: (list of objects)
+4. recommended_analyses: (list of objects)
     Each recommendation should include:
     - name: str
     - objective: str
@@ -69,16 +62,6 @@ Your task is to provide a structured JSON analysis consisting of the following f
     - method: str (e.g., cohort analysis, regression, survival analysis)
     - assumptions: str
     - expected_insights: str
-    
-6. inferred_constraints: (list of strings)
-   - Suggest logical rules or constraints that should likely be enforced between columns, especially based on real-world logic or domain assumptions.
-   - These constraints should be expressed in a format like:
-       - "discount_amount <= total_amount"
-       - "delivered_at >= shipped_at"
-       - "quantity >= 0"
-   - Only include constraints that would apply to individual rows (row-level integrity checks).
-   - Do not restate primary keys or foreign key relationships already defined elsewhere.
-   - Focus on business logic constraints that are not explicitly enforced in the schema, but likely should be.
 
 Output must conform exactly to the JSON structure defined above.
 {format_instructions}
