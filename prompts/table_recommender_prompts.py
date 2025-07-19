@@ -3,8 +3,6 @@ from pydantic import BaseModel, Field
 from langchain.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
-
-# objective summary prompt and parser
 class ObjectiveSummary(BaseModel):
     summerized_objective: str = Field(..., description="Core analysis objective")
     required_data: str = Field(..., description="Data or information needed for the analysis")
@@ -82,3 +80,50 @@ table_rec_prompt = ChatPromptTemplate(
     input_variables=["objective", "tables"],
     partial_variables={"format_instructions": table_rec_parser.get_format_instructions()}
 )
+
+
+table_recommender_prompt = """
+You are an experienced and professional database administrator. Your task is to analyze a user question and a database schema to provide relevant information. 
+The database schema consists of table descriptions, each containing multiple column descriptions. Our goal is to identify the intent of the user and select the relevant tables and columns. 
+
+[Instruction] 
+Analyze the user question and decide what information is needed from the database schema. Think step by step.
+Identify the relevant tables and columns that includes the information needed.
+Discard any table or columns that is not related to the user question and evidence.
+Sort the columns in each relevant table in descending order of relevance and keep the top 6 columns.
+Ensure that at least 3 tables are included in the final output JSON. 6. The output should be in JSON format. 
+
+[Requirements]
+If a table has less than or equal to 5 columns, mark it as “keep_all”.
+If a table is completely irrelevant to the user question and evidence, mark it as “drop_all".
+Prioritize the columns in each relevant table based on their relevance. 
+
+[Example1] 
+【DB_ID】 university_records 
+【Schema】 
+## Table: student 
+Table description: Contains information about students enrolled at the university. 
+[ (student_id, unique identifier for each student. Value examples: [101, 102, 103].),(name, full name of the student. Value examples: [‘Alice Smith’, ‘Bob Lee’].), (gender, gender of the student. Value examples: [‘M’, ‘F’].), (birth_date, date of birth. Value examples: [‘2000-05-10’, ‘1999-12-31’].), (department_id, department the student belongs to. Value examples: [1, 2, 3].) ] 
+…
+
+【Question】 Which student from the Mathematics department had the highest attendance in Calculus during the 2022 Spring semester?
+
+【Answer】 
+```json 
+{ "student": "keep_all", 
+"course": "keep_all", 
+"enrollment": ["student_id", "course_id", "attendance", "semester", “grade"],
+ "department": "keep_all" } 
+``` 
+Question Solved. 
+==========
+ Here is a new example, please start answering: 
+【DB_ID】 {db_id} 
+【Schema】 
+{desc_str} 
+【Foreign keys】 
+{fk_str} 
+【Question】 
+{query} 
+【Answer}
+"""
