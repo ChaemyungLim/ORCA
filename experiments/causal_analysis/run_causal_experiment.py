@@ -27,7 +27,7 @@ with open("all_db_ddls.json") as f:
 ddl_str = json.dumps(all_ddl["daa"], indent=2)
 
 # Queries
-input_path = "experiments/causal_analysis/causal_queries_w_answers.json"
+input_path = "experiments/questions/daa/causal_analysis.json"
 
 with open(input_path, "r") as f:
     queries = json.load(f)
